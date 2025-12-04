@@ -15,7 +15,6 @@ import (
 	"github.com/CLIAIRMONITOR/internal/aider"
 	"github.com/CLIAIRMONITOR/internal/memory"
 	"github.com/nats-io/nats-server/v2/server"
-	"github.com/nats-io/nats.go"
 )
 
 func main() {
@@ -101,17 +100,12 @@ func main() {
 	}
 	log.Printf("[MAIN] Embedded NATS server started on port %d", config.Server.NATSPort)
 
-	// Connect NATS client
+	// Create NATS URL for spawner
 	natsURL := fmt.Sprintf("nats://localhost:%d", config.Server.NATSPort)
-	nc, err := nats.Connect(natsURL)
-	if err != nil {
-		log.Fatalf("[MAIN] Failed to connect to NATS: %v", err)
-	}
-	defer nc.Close()
-	log.Println("[MAIN] Connected to NATS server")
+	log.Printf("[MAIN] NATS URL for agents: %s", natsURL)
 
-	// Create Aider spawner
-	spawner := aider.NewSpawner(nc, config)
+	// Create Aider spawner (it will create individual NATS clients for each agent)
+	spawner := aider.NewSpawner(natsURL, config)
 	log.Println("[MAIN] Aider spawner initialized")
 
 	// Make databases available (can be used by handlers)
@@ -237,8 +231,7 @@ func main() {
 		log.Printf("[MAIN] HTTP server shutdown error: %v", err)
 	}
 
-	// Shutdown NATS
-	nc.Close()
+	// Shutdown NATS server (agents have their own clients that will be closed)
 	natsServer.Shutdown()
 
 	log.Println("[MAIN] CLIAIRMONITOR shutdown complete")

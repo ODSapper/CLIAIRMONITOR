@@ -1,7 +1,6 @@
 package aider
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -10,8 +9,8 @@ import (
 	"syscall"
 	"time"
 
+	natslib "github.com/CLIAIRMONITOR/internal/nats"
 	"github.com/google/uuid"
-	"github.com/nats-io/nats.go"
 )
 
 // Agent represents a running Aider process
@@ -27,21 +26,21 @@ type Agent struct {
 
 // Spawner manages Aider CLI processes
 type Spawner struct {
-	natsConn *nats.Conn
-	config   *Config
-	agents   map[string]*Agent
-	mu       sync.RWMutex
-	stopCh   chan struct{}
-	wg       sync.WaitGroup
+	natsURL string
+	config  *Config
+	agents  map[string]*Agent
+	mu      sync.RWMutex
+	stopCh  chan struct{}
+	wg      sync.WaitGroup
 }
 
 // NewSpawner creates a new Aider process spawner
-func NewSpawner(nc *nats.Conn, config *Config) *Spawner {
+func NewSpawner(natsURL string, config *Config) *Spawner {
 	s := &Spawner{
-		natsConn: nc,
-		config:   config,
-		agents:   make(map[string]*Agent),
-		stopCh:   make(chan struct{}),
+		natsURL: natsURL,
+		config:  config,
+		agents:  make(map[string]*Agent),
+		stopCh:  make(chan struct{}),
 	}
 
 	// Start agent monitor
@@ -103,10 +102,19 @@ func (s *Spawner) SpawnAgent(agentConfig AgentConfig) (*Agent, error) {
 
 	log.Printf("[SPAWNER] Started Aider process (PID: %d) for agent %s", cmd.Process.Pid, agentID)
 
+	// Create NATS client for this agent
+	clientID := fmt.Sprintf("agent-%s", agentID)
+	agentClient, err := natslib.NewClient(s.natsURL, clientID)
+	if err != nil {
+		cmd.Process.Kill()
+		return nil, fmt.Errorf("failed to create NATS client for agent: %w", err)
+	}
+
 	// Create bridge
-	bridge := NewBridge(agentID, s.natsConn, stdin, stdout, stderr)
+	bridge := NewBridge(agentID, agentClient, stdin, stdout, stderr)
 	if err := bridge.Start(); err != nil {
 		// Kill the process if bridge fails
+		agentClient.Close()
 		cmd.Process.Kill()
 		return nil, fmt.Errorf("failed to start bridge: %w", err)
 	}
@@ -294,23 +302,28 @@ func (s *Spawner) isProcessRunning(process *os.Process) bool {
 
 // publishCrash publishes a crash notification to NATS
 func (s *Spawner) publishCrash(agentID string, agent *Agent) {
-	crashMsg := map[string]interface{}{
-		"agent_id":  agentID,
-		"status":    "crashed",
-		"message":   fmt.Sprintf("Aider process crashed (PID: %d, uptime: %s)", agent.Process.Pid, time.Since(agent.StartedAt)),
-		"timestamp": time.Now(),
+	crashMsg := natslib.SystemBroadcastMessage{
+		Type:    "agent_crashed",
+		Message: fmt.Sprintf("Aider process crashed (PID: %d, uptime: %s)", agent.Process.Pid, time.Since(agent.StartedAt)),
+		Data: map[string]interface{}{
+			"agent_id": agentID,
+			"pid":      agent.Process.Pid,
+			"uptime":   time.Since(agent.StartedAt).String(),
+		},
+		Timestamp: time.Now(),
 	}
 
-	subject := fmt.Sprintf("agent.%s.status", agentID)
-
-	// Publish to NATS (marshaling is handled internally)
-	data, err := json.Marshal(crashMsg)
+	// Create temporary client to publish crash message
+	clientID := fmt.Sprintf("spawner-crash-%s", agentID)
+	client, err := natslib.NewClient(s.natsURL, clientID)
 	if err != nil {
-		log.Printf("[SPAWNER] Failed to marshal crash notification: %v", err)
+		log.Printf("[SPAWNER] Failed to create NATS client for crash notification: %v", err)
 		return
 	}
+	defer client.Close()
 
-	if err := s.natsConn.Publish(subject, data); err != nil {
+	subject := natslib.SubjectSystemBroadcast
+	if err := client.PublishJSON(subject, crashMsg); err != nil {
 		log.Printf("[SPAWNER] Failed to publish crash notification: %v", err)
 	}
 }

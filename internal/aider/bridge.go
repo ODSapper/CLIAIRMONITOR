@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nats-io/nats.go"
+	natslib "github.com/CLIAIRMONITOR/internal/nats"
 )
 
 // Bridge connects an Aider CLI process to NATS messaging
@@ -25,47 +25,33 @@ type Bridge struct {
 	stderr io.ReadCloser
 
 	// NATS connection
-	natsConn  *nats.Conn
-	connected bool
-	mu        sync.RWMutex
+	natsClient *natslib.Client
+	connected  bool
+	mu         sync.RWMutex
 
 	// Control
 	stopCh chan struct{}
 }
 
-// StatusMessage represents an agent status update published to NATS
-type StatusMessage struct {
-	AgentID     string    `json:"agent_id"`
-	Status      string    `json:"status"`
-	CurrentTask string    `json:"current_task"`
-	Timestamp   time.Time `json:"timestamp"`
-}
-
-// CommandMessage represents a command sent to an agent via NATS
-type CommandMessage struct {
-	Type    string                 `json:"type"`
-	Payload map[string]interface{} `json:"payload"`
-}
-
 // NewBridge creates a new Aider-NATS bridge
-func NewBridge(agentID string, nc *nats.Conn, stdin io.WriteCloser, stdout, stderr io.ReadCloser) *Bridge {
+func NewBridge(agentID string, nc *natslib.Client, stdin io.WriteCloser, stdout, stderr io.ReadCloser) *Bridge {
 	return &Bridge{
-		agentID:   agentID,
-		natsConn:  nc,
-		stdin:     stdin,
-		stdout:    stdout,
-		stderr:    stderr,
-		status:    "starting",
-		connected: false,
-		stopCh:    make(chan struct{}),
+		agentID:    agentID,
+		natsClient: nc,
+		stdin:      stdin,
+		stdout:     stdout,
+		stderr:     stderr,
+		status:     "starting",
+		connected:  false,
+		stopCh:     make(chan struct{}),
 	}
 }
 
 // Start begins bridging Aider I/O to NATS
 func (b *Bridge) Start() error {
 	// Subscribe to commands for this agent
-	subject := fmt.Sprintf("agent.%s.command", b.agentID)
-	_, err := b.natsConn.Subscribe(subject, b.handleCommand)
+	subject := fmt.Sprintf(natslib.SubjectAgentCommand, b.agentID)
+	_, err := b.natsClient.Subscribe(subject, b.handleCommand)
 	if err != nil {
 		return fmt.Errorf("failed to subscribe to commands: %w", err)
 	}
@@ -116,6 +102,12 @@ func (b *Bridge) Stop() {
 	}
 
 	b.publishStatus("disconnected", "Bridge stopped")
+
+	// Close NATS client
+	if b.natsClient != nil {
+		b.natsClient.Close()
+	}
+
 	log.Printf("[BRIDGE] Stopped for agent %s", b.agentID)
 }
 
@@ -227,8 +219,8 @@ func (b *Bridge) parseAiderLine(line string) {
 }
 
 // handleCommand processes incoming commands from NATS
-func (b *Bridge) handleCommand(msg *nats.Msg) {
-	var cmd CommandMessage
+func (b *Bridge) handleCommand(msg *natslib.Message) {
+	var cmd natslib.CommandMessage
 
 	if err := json.Unmarshal(msg.Data, &cmd); err != nil {
 		log.Printf("[BRIDGE] Invalid command JSON: %v", err)
@@ -285,41 +277,30 @@ func (b *Bridge) publishStatus(status, task string) {
 	b.currentTask = task
 	b.mu.Unlock()
 
-	msg := StatusMessage{
+	msg := natslib.StatusMessage{
 		AgentID:     b.agentID,
 		Status:      status,
 		CurrentTask: task,
 		Timestamp:   time.Now(),
 	}
 
-	data, err := json.Marshal(msg)
-	if err != nil {
-		log.Printf("[BRIDGE] Failed to marshal status: %v", err)
-		return
-	}
-
-	subject := fmt.Sprintf("agent.%s.status", b.agentID)
-	if err := b.natsConn.Publish(subject, data); err != nil {
+	subject := fmt.Sprintf(natslib.SubjectAgentStatus, b.agentID)
+	if err := b.natsClient.PublishJSON(subject, msg); err != nil {
 		log.Printf("[BRIDGE] Failed to publish status: %v", err)
 	}
 }
 
 // publishOutput publishes raw output to NATS for logging and monitoring
 func (b *Bridge) publishOutput(stream, line string) {
-	msg := map[string]interface{}{
-		"agent_id":  b.agentID,
-		"stream":    stream,
-		"line":      line,
-		"timestamp": time.Now(),
+	msg := natslib.OutputMessage{
+		AgentID:   b.agentID,
+		Stream:    stream,
+		Content:   line,
+		Timestamp: time.Now(),
 	}
 
-	data, err := json.Marshal(msg)
-	if err != nil {
-		return
-	}
-
-	subject := fmt.Sprintf("agent.%s.output", b.agentID)
-	b.natsConn.Publish(subject, data)
+	subject := fmt.Sprintf(natslib.SubjectAgentOutput, b.agentID)
+	b.natsClient.PublishJSON(subject, msg)
 }
 
 // GetStatus returns the current agent status (thread-safe)
