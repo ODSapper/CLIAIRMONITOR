@@ -1,0 +1,33 @@
+# CLIAIRMONITOR Configuration
+# Aider Sergeant with Qwen model via LM Studio
+
+server:
+  port: 3001          # HTTP dashboard port
+  nats_port: 4223     # Embedded NATS port
+
+lmstudio:
+  url: http://localhost:1234/v1
+  model: qwen2.5-coder-7b-instruct
+
+aider:
+  model: openai/qwen2.5-coder-7b-instruct
+  api_base: http://localhost:1234/v1
+  auto_commit: false
+  edit_format: diff
+  map_tokens: 1024
+  max_chat_history: 10
+
+sergeant:
+  max_concurrent_agents: 4
+  idle_timeout: 300   # seconds before asking if should stop
+
+agents:
+  - name: Qwen-Dev-1
+    role: developer
+    color: "#00FF00"
+    project_path: ""  # Set via API
+
+  - name: Qwen-Dev-2
+    role: developer
+    color: "#0088FF"
+    project_path: ""
